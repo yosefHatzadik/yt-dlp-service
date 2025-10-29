@@ -23,106 +23,92 @@ def download():
         return jsonify({'error': 'לא סופק קישור'}), 400
     
     try:
-        # הגדרות משופרות כדי לעקוף את זיהוי הבוטים של YouTube
+        # הגדרות אגרסיביות לעקיפת חסימות
         ydl_opts = {
-            'format': 'best[ext=mp4]/best',
+            'format': 'best[ext=mp4][height<=720]/best[ext=mp4]/best',
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
-            'ignoreerrors': False,
-            # הוספת User-Agent כדי להתחזות לדפדפן רגיל
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            # הוספת headers נוספים
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-us,en;q=0.5',
-                'Sec-Fetch-Mode': 'navigate',
-            },
-            # עוקף age restriction
-            'age_limit': None,
-            # משתמש ב-extractor מותאם
+            'geo_bypass': True,
+            'nocheckcertificate': True,
+            # פרמטרים נוספים לעקיפת זיהוי בוט
             'extractor_args': {
                 'youtube': {
-                    'skip': ['dash', 'hls'],
                     'player_client': ['android', 'web'],
+                    'player_skip': ['configs', 'webpage'],
+                    'skip': ['hls', 'dash']
                 }
+            },
+            # cookies ו-headers מותאמים
+            'http_headers': {
+                'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7',
             },
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
             
-            # חיפוש URL להורדה
             download_url = None
             
-            # אופציה 1: URL ישיר
+            # חיפוש URL
             if info.get('url'):
                 download_url = info['url']
-            
-            # אופציה 2: חיפוש בפורמטים
             elif info.get('formats'):
-                # מחפש פורמט עם URL וסיומת mp4
+                # מעדיף mp4 עד 720p
                 for fmt in reversed(info['formats']):
-                    if fmt.get('url') and fmt.get('ext') == 'mp4' and not fmt.get('acodec') == 'none':
-                        download_url = fmt['url']
-                        break
+                    if (fmt.get('url') and 
+                        fmt.get('ext') == 'mp4' and 
+                        fmt.get('vcodec') != 'none' and
+                        fmt.get('acodec') != 'none'):
+                        if not fmt.get('height') or fmt.get('height') <= 720:
+                            download_url = fmt['url']
+                            break
                 
-                # אם לא מצאנו mp4 מלא, ניקח כל פורמט עם URL
+                # אם לא מצאנו, ניקח כל mp4
+                if not download_url:
+                    for fmt in reversed(info['formats']):
+                        if fmt.get('url') and fmt.get('ext') == 'mp4':
+                            download_url = fmt['url']
+                            break
+                
+                # אחרון - כל פורמט עם URL
                 if not download_url:
                     for fmt in reversed(info['formats']):
                         if fmt.get('url'):
                             download_url = fmt['url']
                             break
             
-            # אופציה 3: requested_formats
-            elif info.get('requested_formats'):
-                for fmt in info['requested_formats']:
-                    if fmt.get('url'):
-                        download_url = fmt['url']
-                        break
-            
             if not download_url:
                 return jsonify({
-                    'error': 'לא נמצא קישור הורדה ישיר',
-                    'info': 'הסרטון עשוי לדרוש עיבוד נוסף'
-                }), 400
+                    'error': 'לא נמצא קישור הורדה',
+                    'help': 'הסרטון עשוי להיות פרטי או מוגבל גיאוגרפית'
+                }), 404
             
             return jsonify({
                 'success': True,
-                'title': info.get('title', 'לא ידוע'),
+                'title': info.get('title', 'Unknown'),
                 'duration': info.get('duration', 0),
                 'thumbnail': info.get('thumbnail', ''),
                 'download_url': download_url,
-                'uploader': info.get('uploader', 'לא ידוע'),
-                'ext': info.get('ext', 'mp4'),
+                'uploader': info.get('uploader', 'Unknown'),
+                'view_count': info.get('view_count', 0),
                 'filesize': info.get('filesize') or info.get('filesize_approx', 0)
             })
     
-    except yt_dlp.utils.DownloadError as e:
-        error_msg = str(e)
-        # אם זו שגיאת בוט, תן הודעה ברורה יותר
-        if 'Sign in to confirm' in error_msg or 'bot' in error_msg.lower():
-            return jsonify({
-                'error': 'YouTube חוסם את הבקשה',
-                'details': 'נסה שוב בעוד מספר שניות, או השתמש בסרטון אחר',
-                'technical': error_msg
-            }), 429
-        return jsonify({
-            'error': 'שגיאת הורדה',
-            'details': error_msg
-        }), 500
-    
     except Exception as e:
+        error_msg = str(e)
         return jsonify({
-            'error': 'שגיאה כללית',
-            'details': str(e),
-            'type': type(e).__name__
+            'error': 'שגיאה בעיבוד הסרטון',
+            'details': error_msg,
+            'video_url': video_url
         }), 500
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'service': 'yt-dlp-downloader'})
+    return jsonify({'status': 'ok'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
