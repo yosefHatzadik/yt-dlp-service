@@ -189,17 +189,17 @@ def get_formats():
 
 @app.route('/get-download-url', methods=['POST', 'GET'])
 def get_download_url():
-    """מחזיר קישור הורדה ישיר - מוודא שזה קובץ MP4 ולא streaming"""
+    """מחזיר קישור הורדה ישיר - מוודא שזה קובץ ולא streaming"""
     try:
         if request.method == 'POST':
             data = request.get_json() or {}
             youtube_url = data.get('url') or request.args.get('url')
             cookies_data = data.get('cookies', '')
-            format_id = data.get('format', 'best[ext=mp4][protocol^=https]')
+            format_id = data.get('format', 'best')
         else:
             youtube_url = request.args.get('url')
             cookies_data = request.args.get('cookies', '')
-            format_id = request.args.get('format', 'best[ext=mp4][protocol^=https]')
+            format_id = request.args.get('format', 'best')
         
         if not youtube_url:
             return jsonify({'success': False, 'error': 'חסר פרמטר url'}), 400
@@ -209,63 +209,78 @@ def get_download_url():
         cookies_file = get_cookies_file(cookies_data)
         
         try:
-            ydl_opts = {
-                'format': format_id,
-                'quiet': True,
-                'no_warnings': True,
-            }
+            # ננסה פורמטים שונים עד שנמצא משהו שעובד
+            format_attempts = [
+                format_id,  # הפורמט שהמשתמש ביקש
+                'best[ext=mp4]',  # MP4 הכי טוב
+                'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',  # וידאו+אודיו
+                'best',  # כל דבר
+            ]
             
-            if cookies_file:
-                ydl_opts['cookiefile'] = cookies_file
+            last_error = None
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(youtube_url, download=False)
+            for attempt_format in format_attempts:
+                try:
+                    logging.info(f"מנסה פורמט: {attempt_format}")
+                    
+                    ydl_opts = {
+                        'format': attempt_format,
+                        'quiet': True,
+                        'no_warnings': True,
+                    }
+                    
+                    if cookies_file:
+                        ydl_opts['cookiefile'] = cookies_file
+                    
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(youtube_url, download=False)
+                    
+                    download_url = info.get('url')
+                    
+                    if not download_url:
+                        continue
+                    
+                    # בדיקה שזה לא manifest
+                    is_manifest = 'manifest' in download_url.lower() or 'm3u8' in download_url or 'mpd' in download_url
+                    
+                    if not is_manifest:
+                        # מצאנו קישור ישיר!
+                        logging.info(f"✅ קישור ישיר נמצא עם פורמט: {attempt_format}")
+                        
+                        return jsonify({
+                            'success': True,
+                            'download_url': download_url,
+                            'title': info.get('title'),
+                            'ext': info.get('ext', 'mp4'),
+                            'filesize': info.get('filesize') or info.get('filesize_approx'),
+                            'duration': info.get('duration'),
+                            'thumbnail': info.get('thumbnail'),
+                            'format_id': info.get('format_id'),
+                            'format_used': attempt_format,
+                            'resolution': info.get('resolution'),
+                            'width': info.get('width'),
+                            'height': info.get('height'),
+                            'protocol': info.get('protocol'),
+                            'is_direct': True
+                        })
+                    else:
+                        logging.warning(f"פורמט {attempt_format} הוא streaming, ממשיך...")
+                        
+                except yt_dlp.utils.DownloadError as e:
+                    last_error = str(e)
+                    logging.warning(f"פורמט {attempt_format} לא זמין: {e}")
+                    continue
             
-            download_url = info.get('url')
-            
-            if not download_url:
-                return jsonify({
-                    'success': False, 
-                    'error': 'לא נמצא קישור הורדה'
-                }), 500
-            
-            # בדיקה שזה לא manifest
-            if 'manifest' in download_url.lower() or 'm3u8' in download_url or 'mpd' in download_url:
-                logging.warning("הקישור הוא streaming manifest, מנסה פורמט אחר...")
-                
-                # ננסה לקבל פורמט ישיר
-                ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-                
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(youtube_url, download=False)
-                
-                download_url = info.get('url')
-                
-                # אם עדיין manifest, נאלץ להוריד דרך השרת
-                if 'manifest' in download_url.lower() or 'm3u8' in download_url:
-                    return jsonify({
-                        'success': False,
-                        'error': 'הסרטון זמין רק בפורמט streaming - השתמש ב-/download',
-                        'error_type': 'streaming_only',
-                        'suggested_endpoint': '/download'
-                    }), 400
-            
-            logging.info(f"✅ קישור ישיר נמצא")
+            # אם הגענו לכאן, לא מצאנו קישור ישיר
+            logging.error("לא נמצא קישור ישיר לאף פורמט")
             
             return jsonify({
-                'success': True,
-                'download_url': download_url,
-                'title': info.get('title'),
-                'ext': info.get('ext', 'mp4'),
-                'filesize': info.get('filesize') or info.get('filesize_approx'),
-                'duration': info.get('duration'),
-                'thumbnail': info.get('thumbnail'),
-                'format_id': info.get('format_id'),
-                'resolution': info.get('resolution'),
-                'width': info.get('width'),
-                'height': info.get('height'),
-                'protocol': info.get('protocol')
-            })
+                'success': False,
+                'error': 'הסרטון זמין רק בפורמט streaming - השתמש ב-/download',
+                'error_type': 'streaming_only',
+                'suggested_endpoint': '/download',
+                'last_error': last_error
+            }), 400
             
         finally:
             cleanup_file(cookies_file)
