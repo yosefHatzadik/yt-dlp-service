@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify
 import subprocess
 import tempfile
 import os
-import json
 
 app = Flask(__name__)
 
@@ -14,65 +13,62 @@ def run():
             data = request.get_json() if request.is_json else request.form.to_dict()
         else:
             data = request.args.to_dict()
-        
+
         cmd = data.get('cmd') or data.get('command')
-        cookies = data.get('cookies', '')
-        
         if not cmd:
             return jsonify({'error': 'Missing cmd parameter'}), 400
-        
-        # הכנת פקודה
+
+        # בניית הפקודה הבסיסית
         command = ['yt-dlp'] + cmd.split()
-        
-        # הוספת עוגיות אם יש
-        cookies_file = None
-        if cookies.strip():
+
+        # אופציה 1 (מומלצת ביותר): cookies ישירות מהדפדפן בשרת Render
+        browser = data.get('browser', '').lower()
+        if browser in ['chrome', 'firefox', 'edge', 'brave', 'opera', 'safari']:
+            command.extend(['--cookies-from-browser', browser])
+
+        # אופציה 2 (גיבוי): אם שלחת קובץ cookies.txt כטקסט
+        elif 'cookies' in data and data['cookies'].strip():
+            cookies = data['cookies']
             temp_dir = tempfile.mkdtemp()
             cookies_file = os.path.join(temp_dir, 'cookies.txt')
             with open(cookies_file, 'w', encoding='utf-8') as f:
                 if not cookies.strip().startswith('# Netscape'):
-                    f.write('# Netscape HTTP Cookie File\n')
-                    f.write('# This is a generated file! Do not edit.\n\n')
+                    f.write('# Netscape HTTP Cookie File\n\n')
                 f.write(cookies)
             command.extend(['--cookies', cookies_file])
-        
-        # הוספת --dump-json אוטומטית אם לא ביקשו הורדה
-        if '--dump-json' not in command and '-J' not in command and '-o' not in command:
-            command.append('--dump-json')
-        
-        # הרצת הפקודה
+
+        # הרצה
         result = subprocess.run(
             command,
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=90  # קצת יותר זמן לבטיחות
         )
-        
-        # ניקוי עוגיות
-        if cookies_file and os.path.exists(cookies_file):
+
+        # ניקוי קובץ עוגיות זמני אם היה
+        if 'cookies_file' in locals() and os.path.exists(cookies_file):
             os.remove(cookies_file)
-            os.rmdir(os.path.dirname(cookies_file))
-        
-        # החזרת התוצאה
+            os.rmdir(temp_dir)
+
+        # תגובה
         if result.returncode != 0:
             return jsonify({
-                'error': result.stderr,
-                'stdout': result.stdout,
+                'error': result.stderr.strip(),
+                'stdout': result.stdout.strip(),
                 'returncode': result.returncode
             }), 500
-        
-        # ניסיון לפרסר JSON אם יש
+
+        # אם זה קישור ישיר – נחזיר אותו יפה
+        stdout = result.stdout.strip()
+        if stdout.startswith('https://'):
+            return jsonify({'url': stdout})
+
+        # אחרת נחזיר JSON של yt-dlp
         try:
-            return jsonify(json.loads(result.stdout))
+            return jsonify(json.loads(stdout))
         except:
-            # אם לא JSON, החזר טקסט
-            return jsonify({
-                'stdout': result.stdout,
-                'stderr': result.stderr
-            })
-        
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': 'Command timeout'}), 500
+            return jsonify({'stdout': stdout, 'stderr': result.stderr.strip()})
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
