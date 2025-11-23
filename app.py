@@ -14,18 +14,26 @@ def home():
     <body style="font-family: Arial; padding: 20px;">
         <h1>🎥 שירות הורדת YouTube</h1>
         <p>השתמש ב-API:</p>
-        <code>GET /download?url=[youtube-url]&cookies=[cookies-string]</code>
-        <br><br>
-        <p><strong>cookies</strong> הוא פרמטר אופציונלי במבנה Netscape</p>
+        <h3>GET:</h3>
+        <code>GET /download?url=[youtube-url]</code>
+        <h3>POST (עם עוגיות):</h3>
+        <code>POST /download</code>
+        <pre>{"url": "...", "cookies": "..."}</pre>
     </body>
     </html>
     '''
 
-@app.route('/download')
+@app.route('/download', methods=['GET', 'POST'])
 def download_video():
     try:
-        youtube_url = request.args.get('url')
-        cookies_data = request.args.get('cookies', '')
+        # תמיכה ב-GET וב-POST
+        if request.method == 'POST':
+            data = request.get_json() or {}
+            youtube_url = data.get('url') or request.args.get('url')
+            cookies_data = data.get('cookies', '')
+        else:
+            youtube_url = request.args.get('url')
+            cookies_data = request.args.get('cookies', '')
         
         if not youtube_url:
             return jsonify({'error': 'חסר פרמטר url'}), 400
