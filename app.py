@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import subprocess
 import tempfile
 import os
+import time
 
 app = Flask(__name__)
 
@@ -23,44 +24,49 @@ def run_yt_dlp():
                 f.write(cookies_content)
         
         full_cmd = ['yt-dlp']
-        full_cmd.extend(cmd_args.split())
-        if cookies_path:
-            full_cmd.append('--cookies')
-            full_cmd.append(cookies_path)
         
-        # EJS solver (משתמש ב-Deno)
-        full_cmd.append('--remote-components')
-        full_cmd.append('ejs:github')
+        # הוסף cookies לפני הכל
+        if cookies_path:
+            full_cmd.extend(['--cookies', cookies_path])
+        
+        # אסטרטגיות עקיפת בוט
+        full_cmd.extend([
+            '--extractor-retries', '10',
+            '--fragment-retries', '10',
+            '--retry-sleep', '10',
+            '--sleep-requests', '3',
+            '--sleep-interval', '15',
+            '--max-sleep-interval', '45',
+            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '--add-header', 'Accept-Language:en-US,en;q=0.9',
+            '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            '--no-check-certificates'
+        ])
         
         # Data Sync ID
         if data_sync_id:
-            full_cmd.append('--extractor-args')
-            full_cmd.append(f'youtube:data_sync_id={data_sync_id}')
+            full_cmd.extend(['--extractor-args', f'youtube:data_sync_id={data_sync_id}'])
         
-        # Throttle מוגבר ל-429
-        full_cmd.append('--sleep-interval')
-        full_cmd.append('10')
-        full_cmd.append('--max-sleep-interval')
-        full_cmd.append('30')
+        # הוסף את פקודות המשתמש בסוף
+        full_cmd.extend(cmd_args.split())
         
         try:
+            # המתן קצת לפני הבקשה
+            time.sleep(2)
+            
             result = subprocess.run(
                 full_cmd,
                 capture_output=True,
                 text=True,
                 cwd=tmpdir,
-                timeout=900  # 15 דקות
+                timeout=900
             )
-            
-            output_files = []
-            if result.returncode == 0 and os.listdir(tmpdir):
-                output_files = [os.path.join(tmpdir, f) for f in os.listdir(tmpdir) if not f.startswith('.')]
             
             return jsonify({
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "returncode": result.returncode,
-                "output_files": output_files
+                "cmd": ' '.join(full_cmd)  # לדיבוג
             })
         except subprocess.TimeoutExpired:
             return jsonify({"error": "Command timed out"}), 408
