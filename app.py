@@ -22,6 +22,10 @@ def home():
         <code>POST /get-download-url</code>
         <pre>{"url": "...", "cookies": "...", "format": "best"}</pre>
         
+        <h3>2️⃣b קבלת קישור לפורמט ספציפי:</h3>
+        <code>POST /get-format-url</code>
+        <pre>{"url": "...", "cookies": "...", "format_id": "137"}</pre>
+        
         <h3>3️⃣ הורדה דרך השרת (לאיטיות):</h3>
         <code>POST /download</code>
         <pre>{"url": "...", "cookies": "...", "format": "best"}</pre>
@@ -95,20 +99,22 @@ def handle_yt_dlp_error(e):
 
 @app.route('/formats', methods=['POST', 'GET'])
 def get_formats():
-    """מחזיר רשימת כל הפורמטים הזמינים"""
+    """מחזיר רשימת כל הפורמטים הזמינים עם קישורי הורדה"""
     try:
         if request.method == 'POST':
             data = request.get_json() or {}
             youtube_url = data.get('url') or request.args.get('url')
             cookies_data = data.get('cookies', '')
+            include_urls = data.get('include_urls', True)  # ברירת מחדל: כן
         else:
             youtube_url = request.args.get('url')
             cookies_data = request.args.get('cookies', '')
+            include_urls = request.args.get('include_urls', 'true').lower() == 'true'
         
         if not youtube_url:
             return jsonify({'success': False, 'error': 'חסר פרמטר url'}), 400
         
-        logging.info(f"מבקש פורמטים: {youtube_url}")
+        logging.info(f"מבקש פורמטים: {youtube_url} (כולל קישורים: {include_urls})")
         
         cookies_file = get_cookies_file(cookies_data)
         
@@ -116,7 +122,6 @@ def get_formats():
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
-                'skip_download': True,
             }
             
             if cookies_file:
@@ -127,18 +132,39 @@ def get_formats():
             
             formats = []
             for f in info.get('formats', []):
-                formats.append({
+                format_info = {
                     'format_id': f.get('format_id'),
                     'ext': f.get('ext'),
                     'resolution': f.get('resolution') or f'{f.get("width")}x{f.get("height")}' if f.get('width') else 'audio only',
+                    'width': f.get('width'),
+                    'height': f.get('height'),
                     'filesize': f.get('filesize'),
                     'filesize_mb': round(f.get('filesize') / 1024 / 1024, 2) if f.get('filesize') else None,
                     'vcodec': f.get('vcodec'),
                     'acodec': f.get('acodec'),
                     'fps': f.get('fps'),
                     'format_note': f.get('format_note'),
-                    'quality': f.get('quality')
-                })
+                    'quality': f.get('quality'),
+                    'tbr': f.get('tbr'),  # Total bitrate
+                }
+                
+                # הוספת קישור רק אם מבוקש ואם הוא קיים
+                if include_urls and f.get('url'):
+                    # בדיקה שזה לא HLS/DASH manifest
+                    url = f.get('url')
+                    if not ('manifest' in url.lower() or 'm3u8' in url or 'mpd' in url):
+                        format_info['download_url'] = url
+                    else:
+                        format_info['download_url'] = None
+                        format_info['note'] = 'streaming format - requires special handling'
+                
+                formats.append(format_info)
+            
+            # מציאת הפורמט הטוב ביותר (MP4 עם וידאו ואודיו)
+            best_format = None
+            best_combined = [f for f in formats if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('ext') == 'mp4']
+            if best_combined:
+                best_format = max(best_combined, key=lambda x: (x.get('height') or 0, x.get('tbr') or 0))
             
             return jsonify({
                 'success': True,
@@ -146,7 +172,9 @@ def get_formats():
                 'duration': info.get('duration'),
                 'thumbnail': info.get('thumbnail'),
                 'formats': formats,
-                'best_video': info.get('format_id')
+                'best_format_id': best_format['format_id'] if best_format else None,
+                'best_format_info': best_format,
+                'total_formats': len(formats)
             })
             
         finally:
@@ -161,17 +189,17 @@ def get_formats():
 
 @app.route('/get-download-url', methods=['POST', 'GET'])
 def get_download_url():
-    """מחזיר קישור הורדה ישיר (מומלץ!)"""
+    """מחזיר קישור הורדה ישיר - מוודא שזה קובץ MP4 ולא streaming"""
     try:
         if request.method == 'POST':
             data = request.get_json() or {}
             youtube_url = data.get('url') or request.args.get('url')
             cookies_data = data.get('cookies', '')
-            format_id = data.get('format', 'best[ext=mp4]/best')
+            format_id = data.get('format', 'best[ext=mp4][protocol^=https]')
         else:
             youtube_url = request.args.get('url')
             cookies_data = request.args.get('cookies', '')
-            format_id = request.args.get('format', 'best[ext=mp4]/best')
+            format_id = request.args.get('format', 'best[ext=mp4][protocol^=https]')
         
         if not youtube_url:
             return jsonify({'success': False, 'error': 'חסר פרמטר url'}), 400
@@ -185,7 +213,6 @@ def get_download_url():
                 'format': format_id,
                 'quiet': True,
                 'no_warnings': True,
-                'skip_download': True,
             }
             
             if cookies_file:
@@ -202,7 +229,28 @@ def get_download_url():
                     'error': 'לא נמצא קישור הורדה'
                 }), 500
             
-            logging.info(f"✅ קישור נמצא")
+            # בדיקה שזה לא manifest
+            if 'manifest' in download_url.lower() or 'm3u8' in download_url or 'mpd' in download_url:
+                logging.warning("הקישור הוא streaming manifest, מנסה פורמט אחר...")
+                
+                # ננסה לקבל פורמט ישיר
+                ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(youtube_url, download=False)
+                
+                download_url = info.get('url')
+                
+                # אם עדיין manifest, נאלץ להוריד דרך השרת
+                if 'manifest' in download_url.lower() or 'm3u8' in download_url:
+                    return jsonify({
+                        'success': False,
+                        'error': 'הסרטון זמין רק בפורמט streaming - השתמש ב-/download',
+                        'error_type': 'streaming_only',
+                        'suggested_endpoint': '/download'
+                    }), 400
+            
+            logging.info(f"✅ קישור ישיר נמצא")
             
             return jsonify({
                 'success': True,
@@ -213,7 +261,85 @@ def get_download_url():
                 'duration': info.get('duration'),
                 'thumbnail': info.get('thumbnail'),
                 'format_id': info.get('format_id'),
-                'resolution': info.get('resolution')
+                'resolution': info.get('resolution'),
+                'width': info.get('width'),
+                'height': info.get('height'),
+                'protocol': info.get('protocol')
+            })
+            
+        finally:
+            cleanup_file(cookies_file)
+    
+    except yt_dlp.utils.DownloadError as e:
+        return handle_yt_dlp_error(e)
+    except Exception as e:
+        logging.error(f"שגיאה: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/get-format-url', methods=['POST', 'GET'])
+def get_format_url():
+    """מחזיר קישור לפורמט ספציפי לפי format_id"""
+    try:
+        if request.method == 'POST':
+            data = request.get_json() or {}
+            youtube_url = data.get('url') or request.args.get('url')
+            cookies_data = data.get('cookies', '')
+            format_id = data.get('format_id') or request.args.get('format_id')
+        else:
+            youtube_url = request.args.get('url')
+            cookies_data = request.args.get('cookies', '')
+            format_id = request.args.get('format_id')
+        
+        if not youtube_url:
+            return jsonify({'success': False, 'error': 'חסר פרמטר url'}), 400
+        
+        if not format_id:
+            return jsonify({'success': False, 'error': 'חסר פרמטר format_id'}), 400
+        
+        logging.info(f"מבקש קישור לפורמט {format_id}: {youtube_url}")
+        
+        cookies_file = get_cookies_file(cookies_data)
+        
+        try:
+            ydl_opts = {
+                'format': format_id,
+                'quiet': True,
+                'no_warnings': True,
+            }
+            
+            if cookies_file:
+                ydl_opts['cookiefile'] = cookies_file
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(youtube_url, download=False)
+            
+            download_url = info.get('url')
+            
+            if not download_url:
+                return jsonify({
+                    'success': False, 
+                    'error': f'לא נמצא קישור לפורמט {format_id}'
+                }), 404
+            
+            # בדיקת סוג הקישור
+            is_manifest = 'manifest' in download_url.lower() or 'm3u8' in download_url or 'mpd' in download_url
+            
+            logging.info(f"✅ קישור לפורמט {format_id} - {'streaming' if is_manifest else 'direct'}")
+            
+            return jsonify({
+                'success': True,
+                'download_url': download_url,
+                'title': info.get('title'),
+                'format_id': format_id,
+                'ext': info.get('ext'),
+                'filesize': info.get('filesize'),
+                'resolution': info.get('resolution'),
+                'width': info.get('width'),
+                'height': info.get('height'),
+                'is_streaming': is_manifest,
+                'protocol': info.get('protocol'),
+                'note': 'streaming format - use /download endpoint' if is_manifest else 'direct download link'
             })
             
         finally:
