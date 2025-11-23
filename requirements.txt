@@ -1,3 +1,2 @@
-fastapi
-uvicorn[standard]
-yt-dlp
+Flask==2.3.3
+yt-dlp==2023.12.30  # או גרסה עדכנית
