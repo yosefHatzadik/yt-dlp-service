@@ -12,23 +12,27 @@ def home():
     return '''
     <html dir="rtl">
     <body style="font-family: Arial; padding: 20px;">
-        <h1>🎥 שירות YouTube מלא</h1>
+        <h1>🎥 yt-dlp Wrapper API</h1>
+        <p>API פשוט שמעביר פרמטרים ישירות ל-yt-dlp</p>
         
-        <h3>1️⃣ קבלת רשימת פורמטים:</h3>
-        <code>POST /formats</code>
-        <pre>{"url": "...", "cookies": "..."}</pre>
+        <h3>POST /execute</h3>
+        <p>מריץ yt-dlp עם פרמטרים שאתה שולח</p>
+        <pre>{
+  "url": "youtube_url",
+  "yt_dlp_options": {
+    "format": "best",
+    "quiet": true,
+    ...
+  },
+  "cookies": "optional_cookies_string",
+  "action": "info|download"
+}</pre>
         
-        <h3>2️⃣ קבלת קישור הורדה ישיר:</h3>
-        <code>POST /get-download-url</code>
-        <pre>{"url": "...", "cookies": "...", "format": "best"}</pre>
-        
-        <h3>2️⃣b קבלת קישור לפורמט ספציפי:</h3>
-        <code>POST /get-format-url</code>
-        <pre>{"url": "...", "cookies": "...", "format_id": "137"}</pre>
-        
-        <h3>3️⃣ הורדה דרך השרת (לאיטיות):</h3>
-        <code>POST /download</code>
-        <pre>{"url": "...", "cookies": "...", "format": "best"}</pre>
+        <p><strong>action:</strong></p>
+        <ul>
+            <li><code>info</code> - רק מידע (ברירת מחדל)</li>
+            <li><code>download</code> - הורדה ושליחת קובץ</li>
+        </ul>
     </body>
     </html>
     '''
@@ -55,387 +59,158 @@ def cleanup_file(filepath):
         if filepath and os.path.exists(filepath):
             os.remove(filepath)
             temp_dir = os.path.dirname(filepath)
-            if os.path.exists(temp_dir):
+            if os.path.exists(temp_dir) and not os.listdir(temp_dir):
                 os.rmdir(temp_dir)
     except Exception as e:
         logging.warning(f"שגיאה בניקוי: {e}")
 
-def handle_yt_dlp_error(e):
-    """מטפל בשגיאות yt-dlp ומחזיר תגובה מתאימה"""
-    error_msg = str(e)
-    logging.error(f"שגיאת yt-dlp: {error_msg}")
-    
-    if 'Sign in' in error_msg or 'login' in error_msg.lower():
-        return jsonify({
-            'success': False,
-            'error': 'הסרטון דורש התחברות - העוגיות לא תקפות או חסרות',
-            'error_type': 'auth_required'
-        }), 403
-    elif 'bot' in error_msg.lower():
-        return jsonify({
-            'success': False,
-            'error': 'YouTube חסם את הבקשה - נסה שוב מאוחר יותר',
-            'error_type': 'bot_detected'
-        }), 429
-    elif 'Private video' in error_msg or 'private' in error_msg.lower():
-        return jsonify({
-            'success': False,
-            'error': 'סרטון פרטי - העוגיות חייבות להיות מחשבון עם גישה',
-            'error_type': 'private'
-        }), 403
-    elif 'Video unavailable' in error_msg:
-        return jsonify({
-            'success': False,
-            'error': 'הסרטון לא זמין',
-            'error_type': 'unavailable'
-        }), 404
-    else:
-        return jsonify({
-            'success': False,
-            'error': f'שגיאה: {error_msg}',
-            'error_type': 'download_error'
-        }), 500
-
-
-@app.route('/formats', methods=['POST', 'GET'])
-def get_formats():
-    """מחזיר רשימת כל הפורמטים הזמינים עם קישורי הורדה"""
+@app.route('/execute', methods=['POST', 'GET'])
+def execute():
+    """מריץ yt-dlp עם הפרמטרים שהתקבלו"""
     try:
+        # קבלת נתונים - תמיכה ב-POST (JSON) וגם ב-GET (query params)
         if request.method == 'POST':
-            data = request.get_json() or {}
-            youtube_url = data.get('url') or request.args.get('url')
-            cookies_data = data.get('cookies', '')
-            include_urls = data.get('include_urls', True)  # ברירת מחדל: כן
+            if request.is_json:
+                data = request.get_json()
+            else:
+                # אם זה form data
+                data = request.form.to_dict()
         else:
-            youtube_url = request.args.get('url')
-            cookies_data = request.args.get('cookies', '')
-            include_urls = request.args.get('include_urls', 'true').lower() == 'true'
+            data = request.args.to_dict()
+        
+        # פרמטרים בסיסיים
+        youtube_url = data.get('url')
+        cookies_data = data.get('cookies', '')
+        action = data.get('action', 'info')  # info או download
+        
+        # אפשרויות yt-dlp - יכול לבוא כ-JSON או כ-string
+        yt_dlp_options = data.get('yt_dlp_options', {})
+        if isinstance(yt_dlp_options, str):
+            import json
+            try:
+                yt_dlp_options = json.loads(yt_dlp_options)
+            except:
+                yt_dlp_options = {}
         
         if not youtube_url:
             return jsonify({'success': False, 'error': 'חסר פרמטר url'}), 400
         
-        logging.info(f"מבקש פורמטים: {youtube_url} (כולל קישורים: {include_urls})")
+        logging.info(f"מעבד: {youtube_url} | action: {action}")
+        logging.info(f"אפשרויות: {yt_dlp_options}")
         
+        # הכנת קובץ עוגיות
         cookies_file = get_cookies_file(cookies_data)
+        temp_dir = None
         
         try:
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-            }
-            
-            if cookies_file:
-                ydl_opts['cookiefile'] = cookies_file
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(youtube_url, download=False)
-            
-            formats = []
-            for f in info.get('formats', []):
-                format_info = {
-                    'format_id': f.get('format_id'),
-                    'ext': f.get('ext'),
-                    'resolution': f.get('resolution') or f'{f.get("width")}x{f.get("height")}' if f.get('width') else 'audio only',
-                    'width': f.get('width'),
-                    'height': f.get('height'),
-                    'filesize': f.get('filesize'),
-                    'filesize_mb': round(f.get('filesize') / 1024 / 1024, 2) if f.get('filesize') else None,
-                    'vcodec': f.get('vcodec'),
-                    'acodec': f.get('acodec'),
-                    'fps': f.get('fps'),
-                    'format_note': f.get('format_note'),
-                    'quality': f.get('quality'),
-                    'tbr': f.get('tbr'),  # Total bitrate
-                }
-                
-                # הוספת קישור רק אם מבוקש ואם הוא קיים
-                if include_urls and f.get('url'):
-                    # בדיקה שזה לא HLS/DASH manifest
-                    url = f.get('url')
-                    if not ('manifest' in url.lower() or 'm3u8' in url or 'mpd' in url):
-                        format_info['download_url'] = url
-                    else:
-                        format_info['download_url'] = None
-                        format_info['note'] = 'streaming format - requires special handling'
-                
-                formats.append(format_info)
-            
-            # מציאת הפורמט הטוב ביותר (MP4 עם וידאו ואודיו)
-            best_format = None
-            best_combined = [f for f in formats if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('ext') == 'mp4']
-            if best_combined:
-                best_format = max(best_combined, key=lambda x: (x.get('height') or 0, x.get('tbr') or 0))
-            
-            return jsonify({
-                'success': True,
-                'title': info.get('title'),
-                'duration': info.get('duration'),
-                'thumbnail': info.get('thumbnail'),
-                'formats': formats,
-                'best_format_id': best_format['format_id'] if best_format else None,
-                'best_format_info': best_format,
-                'total_formats': len(formats)
-            })
-            
-        finally:
-            cleanup_file(cookies_file)
-    
-    except yt_dlp.utils.DownloadError as e:
-        return handle_yt_dlp_error(e)
-    except Exception as e:
-        logging.error(f"שגיאה: {str(e)}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/get-download-url', methods=['POST', 'GET'])
-def get_download_url():
-    """מחזיר קישור הורדה ישיר - מוודא שזה קובץ ולא streaming"""
-    try:
-        if request.method == 'POST':
-            data = request.get_json() or {}
-            youtube_url = data.get('url') or request.args.get('url')
-            cookies_data = data.get('cookies', '')
-            format_id = data.get('format', 'best')
-        else:
-            youtube_url = request.args.get('url')
-            cookies_data = request.args.get('cookies', '')
-            format_id = request.args.get('format', 'best')
-        
-        if not youtube_url:
-            return jsonify({'success': False, 'error': 'חסר פרמטר url'}), 400
-        
-        logging.info(f"מחלץ קישור: {youtube_url} | פורמט: {format_id}")
-        
-        cookies_file = get_cookies_file(cookies_data)
-        
-        try:
-            # ננסה פורמטים שונים עד שנמצא משהו שעובד
-            format_attempts = [
-                format_id,  # הפורמט שהמשתמש ביקש
-                'best[ext=mp4]',  # MP4 הכי טוב
-                'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',  # וידאו+אודיו
-                'best',  # כל דבר
-            ]
-            
-            last_error = None
-            
-            for attempt_format in format_attempts:
-                try:
-                    logging.info(f"מנסה פורמט: {attempt_format}")
-                    
-                    ydl_opts = {
-                        'format': attempt_format,
-                        'quiet': True,
-                        'no_warnings': True,
-                    }
-                    
-                    if cookies_file:
-                        ydl_opts['cookiefile'] = cookies_file
-                    
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(youtube_url, download=False)
-                    
-                    download_url = info.get('url')
-                    
-                    if not download_url:
-                        continue
-                    
-                    # בדיקה שזה לא manifest
-                    is_manifest = 'manifest' in download_url.lower() or 'm3u8' in download_url or 'mpd' in download_url
-                    
-                    if not is_manifest:
-                        # מצאנו קישור ישיר!
-                        logging.info(f"✅ קישור ישיר נמצא עם פורמט: {attempt_format}")
-                        
-                        return jsonify({
-                            'success': True,
-                            'download_url': download_url,
-                            'title': info.get('title'),
-                            'ext': info.get('ext', 'mp4'),
-                            'filesize': info.get('filesize') or info.get('filesize_approx'),
-                            'duration': info.get('duration'),
-                            'thumbnail': info.get('thumbnail'),
-                            'format_id': info.get('format_id'),
-                            'format_used': attempt_format,
-                            'resolution': info.get('resolution'),
-                            'width': info.get('width'),
-                            'height': info.get('height'),
-                            'protocol': info.get('protocol'),
-                            'is_direct': True
-                        })
-                    else:
-                        logging.warning(f"פורמט {attempt_format} הוא streaming, ממשיך...")
-                        
-                except yt_dlp.utils.DownloadError as e:
-                    last_error = str(e)
-                    logging.warning(f"פורמט {attempt_format} לא זמין: {e}")
-                    continue
-            
-            # אם הגענו לכאן, לא מצאנו קישור ישיר
-            logging.error("לא נמצא קישור ישיר לאף פורמט")
-            
-            return jsonify({
-                'success': False,
-                'error': 'הסרטון זמין רק בפורמט streaming - השתמש ב-/download',
-                'error_type': 'streaming_only',
-                'suggested_endpoint': '/download',
-                'last_error': last_error
-            }), 400
-            
-        finally:
-            cleanup_file(cookies_file)
-    
-    except yt_dlp.utils.DownloadError as e:
-        return handle_yt_dlp_error(e)
-    except Exception as e:
-        logging.error(f"שגיאה: {str(e)}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/get-format-url', methods=['POST', 'GET'])
-def get_format_url():
-    """מחזיר קישור לפורמט ספציפי לפי format_id"""
-    try:
-        if request.method == 'POST':
-            data = request.get_json() or {}
-            youtube_url = data.get('url') or request.args.get('url')
-            cookies_data = data.get('cookies', '')
-            format_id = data.get('format_id') or request.args.get('format_id')
-        else:
-            youtube_url = request.args.get('url')
-            cookies_data = request.args.get('cookies', '')
-            format_id = request.args.get('format_id')
-        
-        if not youtube_url:
-            return jsonify({'success': False, 'error': 'חסר פרמטר url'}), 400
-        
-        if not format_id:
-            return jsonify({'success': False, 'error': 'חסר פרמטר format_id'}), 400
-        
-        logging.info(f"מבקש קישור לפורמט {format_id}: {youtube_url}")
-        
-        cookies_file = get_cookies_file(cookies_data)
-        
-        try:
-            ydl_opts = {
-                'format': format_id,
-                'quiet': True,
-                'no_warnings': True,
-            }
-            
-            if cookies_file:
-                ydl_opts['cookiefile'] = cookies_file
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(youtube_url, download=False)
-            
-            download_url = info.get('url')
-            
-            if not download_url:
-                return jsonify({
-                    'success': False, 
-                    'error': f'לא נמצא קישור לפורמט {format_id}'
-                }), 404
-            
-            # בדיקת סוג הקישור
-            is_manifest = 'manifest' in download_url.lower() or 'm3u8' in download_url or 'mpd' in download_url
-            
-            logging.info(f"✅ קישור לפורמט {format_id} - {'streaming' if is_manifest else 'direct'}")
-            
-            return jsonify({
-                'success': True,
-                'download_url': download_url,
-                'title': info.get('title'),
-                'format_id': format_id,
-                'ext': info.get('ext'),
-                'filesize': info.get('filesize'),
-                'resolution': info.get('resolution'),
-                'width': info.get('width'),
-                'height': info.get('height'),
-                'is_streaming': is_manifest,
-                'protocol': info.get('protocol'),
-                'note': 'streaming format - use /download endpoint' if is_manifest else 'direct download link'
-            })
-            
-        finally:
-            cleanup_file(cookies_file)
-    
-    except yt_dlp.utils.DownloadError as e:
-        return handle_yt_dlp_error(e)
-    except Exception as e:
-        logging.error(f"שגיאה: {str(e)}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/download', methods=['POST', 'GET'])
-def download_video():
-    """מוריד דרך השרת ושולח לקליינט (לא מומלץ לקבצים גדולים)"""
-    try:
-        if request.method == 'POST':
-            data = request.get_json() or {}
-            youtube_url = data.get('url') or request.args.get('url')
-            cookies_data = data.get('cookies', '')
-            format_id = data.get('format', 'best[ext=mp4]/best')
-        else:
-            youtube_url = request.args.get('url')
-            cookies_data = request.args.get('cookies', '')
-            format_id = request.args.get('format', 'best[ext=mp4]/best')
-        
-        if not youtube_url:
-            return jsonify({'error': 'חסר פרמטר url'}), 400
-        
-        logging.info(f"מוריד: {youtube_url}")
-        
-        temp_dir = tempfile.mkdtemp()
-        cookies_file = get_cookies_file(cookies_data)
-        
-        try:
-            ydl_opts = {
-                'format': format_id,
-                'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            # הגדרות ברירת מחדל
+            default_opts = {
                 'quiet': False,
                 'no_warnings': False,
             }
             
+            # מיזוג עם האפשרויות שהתקבלו
+            ydl_opts = {**default_opts, **yt_dlp_options}
+            
+            # הוספת עוגיות אם קיימות
             if cookies_file:
                 ydl_opts['cookiefile'] = cookies_file
+                logging.info("משתמש בעוגיות")
             
+            # אם זו הורדה, הגדרת תיקיה זמנית
+            if action == 'download':
+                temp_dir = tempfile.mkdtemp()
+                ydl_opts['outtmpl'] = os.path.join(temp_dir, '%(title)s.%(ext)s')
+            
+            # הרצת yt-dlp
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(youtube_url, download=True)
+                info = ydl.extract_info(youtube_url, download=(action == 'download'))
+            
+            # טיפול לפי סוג הפעולה
+            if action == 'download':
+                # מציאת הקובץ שהורד
                 filename = ydl.prepare_filename(info)
-            
-            if not os.path.exists(filename):
-                return jsonify({'error': 'הקובץ לא נוצר'}), 500
-            
-            logging.info(f"✅ הורדה הושלמה: {filename}")
-            
-            return send_file(
-                filename,
-                as_attachment=True,
-                download_name=os.path.basename(filename),
-                mimetype='video/mp4'
-            )
+                
+                if not os.path.exists(filename):
+                    return jsonify({'success': False, 'error': 'הקובץ לא נוצר'}), 500
+                
+                logging.info(f"✅ הורדה הושלמה: {filename}")
+                
+                # שליחת הקובץ
+                return send_file(
+                    filename,
+                    as_attachment=True,
+                    download_name=os.path.basename(filename),
+                    mimetype='video/mp4'
+                )
+            else:
+                # החזרת מידע בלבד
+                # ניקוי מידע רגיש/מיותר
+                safe_info = {
+                    'success': True,
+                    'id': info.get('id'),
+                    'title': info.get('title'),
+                    'url': info.get('url'),
+                    'ext': info.get('ext'),
+                    'format': info.get('format'),
+                    'format_id': info.get('format_id'),
+                    'width': info.get('width'),
+                    'height': info.get('height'),
+                    'resolution': info.get('resolution'),
+                    'fps': info.get('fps'),
+                    'vcodec': info.get('vcodec'),
+                    'acodec': info.get('acodec'),
+                    'filesize': info.get('filesize'),
+                    'filesize_approx': info.get('filesize_approx'),
+                    'tbr': info.get('tbr'),
+                    'duration': info.get('duration'),
+                    'thumbnail': info.get('thumbnail'),
+                    'description': info.get('description'),
+                    'uploader': info.get('uploader'),
+                    'upload_date': info.get('upload_date'),
+                    'view_count': info.get('view_count'),
+                    'like_count': info.get('like_count'),
+                    'protocol': info.get('protocol'),
+                    'formats': info.get('formats', []) if data.get('include_formats') else None,
+                }
+                
+                # הסרת ערכים ריקים
+                safe_info = {k: v for k, v in safe_info.items() if v is not None}
+                
+                logging.info(f"✅ מידע נשלח")
+                
+                return jsonify(safe_info)
             
         finally:
+            # ניקוי
             cleanup_file(cookies_file)
-            # ניקוי תיקיית temp אחרי שליחה
-            try:
-                for f in os.listdir(temp_dir):
-                    try:
-                        os.remove(os.path.join(temp_dir, f))
-                    except:
-                        pass
-                os.rmdir(temp_dir)
-            except:
-                pass
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    for f in os.listdir(temp_dir):
+                        try:
+                            os.remove(os.path.join(temp_dir, f))
+                        except:
+                            pass
+                    os.rmdir(temp_dir)
+                except:
+                    pass
     
     except yt_dlp.utils.DownloadError as e:
-        error_response, code = handle_yt_dlp_error(e)
-        return error_response, code
+        error_msg = str(e)
+        logging.error(f"שגיאת yt-dlp: {error_msg}")
+        return jsonify({
+            'success': False,
+            'error': error_msg,
+            'error_type': 'yt_dlp_error'
+        }), 500
+        
     except Exception as e:
-        logging.error(f"שגיאה: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
+        logging.error(f"שגיאה כללית: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'error_type': 'general_error'
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
